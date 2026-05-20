@@ -1,16 +1,16 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, useMemo } from "react"
 import { supabase } from "../lib/supabase"
 import { useAuth } from "../lib/auth"
 
 type ContactStatus = 'new' | 'contacted' | 'discarded'
 
 type Contact = {
-    id: string;
-    name: string;
-    email: string;
-    message: string;
-    status: ContactStatus;
-    created_at: string;
+    id: string
+    name: string
+    email: string
+    message: string
+    status: ContactStatus
+    created_at: string
 }
 
 const STATUS_OPTIONS: ContactStatus[] = ['new', 'contacted', 'discarded']
@@ -18,10 +18,16 @@ const STATUS_OPTIONS: ContactStatus[] = ['new', 'contacted', 'discarded']
 export default function InboxPage() {
     const { user } = useAuth()
 
-    const [contacts, setContacts] = useState<Contact[]>([])
+    const [contactsById, setContactsById] = useState<Map<string, Contact>>(new Map())
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [agencyName, setAgencyName] = useState<string | null>(null)
+
+    const contacts = useMemo(() => {
+        return Array.from(contactsById.values()).sort(
+            (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        )
+    }, [contactsById])
 
     useEffect(() => {
         let cancelled = false
@@ -46,7 +52,15 @@ export default function InboxPage() {
                 return
             }
 
-            setContacts(contactsResult.data ?? [])
+            // Merge fetched contacts into the Map. If realtime already
+            // added a row, this just overwrites with the same data.
+            setContactsById((prev) => {
+                const next = new Map(prev)
+                for (const row of contactsResult.data ?? []) {
+                    next.set(row.id, row as Contact)
+                }
+                return next
+            })
 
             const profileData = profileResult.data
             if (profileData?.agencies) {
@@ -60,16 +74,53 @@ export default function InboxPage() {
         }
 
         fetchData()
+
+        // Subscribe to realtime. RLS still applies — agents only
+        // receive events for rows their SELECT policy allows.
+        const channel = supabase
+            .channel('contacts-inbox')
+            .on(
+                'postgres_changes',
+                { event: 'INSERT', schema: 'public', table: 'contacts' },
+                (payload) => {
+                    const newRow = payload.new as Contact
+                    setContactsById((prev) => {
+                        const next = new Map(prev)
+                        next.set(newRow.id, newRow)
+                        return next
+                    })
+                }
+            )
+            .on(
+                'postgres_changes',
+                { event: 'UPDATE', schema: 'public', table: 'contacts' },
+                (payload) => {
+                    const updatedRow = payload.new as Contact
+                    setContactsById((prev) => {
+                        const next = new Map(prev)
+                        next.set(updatedRow.id, updatedRow)
+                        return next
+                    })
+                }
+            )
+            .subscribe()
+
         return () => {
             cancelled = true
+            supabase.removeChannel(channel)
         }
     }, [])
 
     const handleStatusChange = async (contactId: string, newStatus: ContactStatus) => {
-        const previous = contacts
-        setContacts((prev) =>
-            prev.map((c) => (c.id === contactId ? { ...c, status: newStatus } : c))
-        )
+        const previous = contactsById.get(contactId)
+        if (!previous) return
+
+        // Optimistic update
+        setContactsById((prev) => {
+            const next = new Map(prev)
+            next.set(contactId, { ...previous, status: newStatus })
+            return next
+        })
 
         const { error } = await supabase
             .from('contacts')
@@ -78,7 +129,11 @@ export default function InboxPage() {
 
         if (error) {
             console.error('Status update failed:', error)
-            setContacts(previous) // rollback
+            setContactsById((prev) => {
+                const next = new Map(prev)
+                next.set(contactId, previous)
+                return next
+            })
             setError(error.message)
         }
     }
@@ -122,7 +177,7 @@ export default function InboxPage() {
                 )}
 
                 {contacts.length === 0 ? (
-                    <p className="text-slate-500 text-sm">No contacts yet</p>
+                    <p className="text-slate-500 text-sm">No contacts yet.</p>
                 ) : (
                     <ul className="space-y-3">
                         {contacts.map((contact) => (
@@ -158,5 +213,4 @@ export default function InboxPage() {
             </main>
         </div>
     )
-
 }
