@@ -1,73 +1,75 @@
-# React + TypeScript + Vite
+# PropPilot Take-Home — Mini Inbox
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A multi-tenant lead inbox for real estate agencies. Public contact forms feed into agent dashboards in realtime, with database-level isolation between agencies.
 
-Currently, two official plugins are available:
+**Live demo:** _TBD — link after deploy_
+**Demo accounts:** _TBD — see bottom of README_
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Stack
 
-## React Compiler
+- Vite + React + TypeScript
+- Supabase (Postgres, Auth, Realtime, RLS)
+- Tailwind CSS v4
+- React Router v6
+- Deployed on Vercel
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+## Run locally
 
-## Expanding the ESLint configuration
+_TBD — fill in at the end_
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+## Design notes
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+### RLS for two audiences
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+The `contacts` table receives traffic from two distinct roles: the
+`anon` role (public form submitters) and the `authenticated` role
+(agency agents). I modelled each one separately, table by table,
+action by action.
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+**Anonymous role**
+- `agencies`: SELECT allowed (used to resolve `:agencySlug → id`;
+  slugs and names are public anyway).
+- `profiles`: no access. Anonymous visitors have no business knowing
+  agency staffing.
+- `contacts`: INSERT only, with `WITH CHECK` validating that the
+  target `agency_id` references a real agency. **Crucially, no
+  SELECT** — even the contact a visitor just submitted, they cannot
+  read back. RLS denies it silently (returns 0 rows, not an error),
+  which is the right shape for a security boundary: an attacker
+  can't tell whether they're filtered out or whether the table is
+  empty.
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+**Authenticated role (agents)**
+- `agencies`: SELECT allowed (so the dashboard can show agency name).
+- `profiles`: SELECT, restricted to their own row via
+  `id = (select auth.uid())`. Agents see their own agency_id and
+  nothing else.
+- `contacts`: SELECT and UPDATE, scoped by a subquery into `profiles`:
+  `agency_id = (select agency_id from profiles where id = (select auth.uid()))`.
+  This is the multi-tenant boundary. The UPDATE policy also has a
+  matching `WITH CHECK` clause preventing an agent from re-parenting
+  a contact to another agency.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+I wrapped `auth.uid()` in a scalar subquery (`(select auth.uid())`)
+per Supabase's RLS performance guide — it lets Postgres cache the
+auth lookup once per query instead of evaluating it per row.
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+The profile-creation flow uses a Postgres trigger
+(`on_auth_user_created`) instead of a client-side insert after
+signup. That makes profile creation atomic with auth user creation
+— they happen in the same transaction or neither happens. No race,
+no orphaned auth users.
+
+### Avoiding duplicates between initial fetch and realtime
+_TBD — Phase 4_
+
+### What I left out and why
+_TBD — final pass_
+
+### Where AI helped, and where it got me into trouble
+_TBD — final pass_
+
+## Decisions worth flagging
+
+- **Supabase region:** Mumbai (`ap-south-1`) — closest to the UAE-based reviewer for lowest realtime latency.
+- _More TBD as we build_
