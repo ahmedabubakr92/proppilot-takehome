@@ -1,75 +1,54 @@
 # PropPilot Take-Home — Mini Inbox
 
-A multi-tenant lead inbox for real estate agencies. Public contact forms feed into agent dashboards in realtime, with database-level isolation between agencies.
+Multi-tenant inbox where real estate agencies receive contacts from a public form. Anyone can submit; only the right agency's agents can see them.
 
-**Live demo:** _TBD — link after deploy_
-**Demo accounts:** _TBD — see bottom of README_
+**Live demo:** _TBD_
+**Demo accounts:** _TBD_
 
 ## Stack
 
 - Vite + React + TypeScript
-- Supabase (Postgres, Auth, Realtime, RLS)
-- Tailwind CSS v4
+- Tailwind v4
 - React Router v6
+- Supabase (Postgres, Auth, Realtime, RLS)
 - Deployed on Vercel
+
+Picked the Mumbai region for Supabase — closest to the UAE, lower realtime latency.
 
 ## Run locally
 
-_TBD — fill in at the end_
+_TBD — at the end_
 
-## Design notes
+## How RLS works here
 
-### RLS for two audiences
+Two audiences hit the `contacts` table: anonymous form submitters and authenticated agents. I wrote separate policies for each.
 
-The `contacts` table receives traffic from two distinct roles: the
-`anon` role (public form submitters) and the `authenticated` role
-(agency agents). I modelled each one separately, table by table,
-action by action.
+The anonymous role can only insert. The insert policy has a `WITH CHECK` that confirms the `agency_id` references a real agency. They can't read anything — not even contacts they just submitted. If anon tries to `select * from contacts`, RLS returns an empty array, not an error. That's the right shape for a security boundary; an attacker can't tell the difference between "empty table" and "filtered out."
 
-**Anonymous role**
-- `agencies`: SELECT allowed (used to resolve `:agencySlug → id`;
-  slugs and names are public anyway).
-- `profiles`: no access. Anonymous visitors have no business knowing
-  agency staffing.
-- `contacts`: INSERT only, with `WITH CHECK` validating that the
-  target `agency_id` references a real agency. **Crucially, no
-  SELECT** — even the contact a visitor just submitted, they cannot
-  read back. RLS denies it silently (returns 0 rows, not an error),
-  which is the right shape for a security boundary: an attacker
-  can't tell whether they're filtered out or whether the table is
-  empty.
+The authenticated role can read and update, but only rows where `agency_id` matches their own agency. I look that up with a subquery into the `profiles` table: `agency_id = (select agency_id from profiles where id = (select auth.uid()))`. The update policy uses the same condition as `WITH CHECK` too, so an agent can't reassign a contact to another agency.
 
-**Authenticated role (agents)**
-- `agencies`: SELECT allowed (so the dashboard can show agency name).
-- `profiles`: SELECT, restricted to their own row via
-  `id = (select auth.uid())`. Agents see their own agency_id and
-  nothing else.
-- `contacts`: SELECT and UPDATE, scoped by a subquery into `profiles`:
-  `agency_id = (select agency_id from profiles where id = (select auth.uid()))`.
-  This is the multi-tenant boundary. The UPDATE policy also has a
-  matching `WITH CHECK` clause preventing an agent from re-parenting
-  a contact to another agency.
+I wrapped `auth.uid()` in `(select ...)` everywhere — Supabase's RLS performance guide says this lets Postgres cache the value once per query instead of evaluating it per row.
 
-I wrapped `auth.uid()` in a scalar subquery (`(select auth.uid())`)
-per Supabase's RLS performance guide — it lets Postgres cache the
-auth lookup once per query instead of evaluating it per row.
+## GRANTs vs RLS 
 
-The profile-creation flow uses a Postgres trigger
-(`on_auth_user_created`) instead of a client-side insert after
-signup. That makes profile creation atomic with auth user creation
-— they happen in the same transaction or neither happens. No race,
-no orphaned auth users.
+Spent a while debugging "Agency not found" before I realised newer Supabase projects don't auto-grant SELECT/INSERT permissions to `anon` and `authenticated`. RLS policies were correct, but queries were failing at the GRANT layer before RLS even ran (Postgres error 42501).
 
-### Avoiding duplicates between initial fetch and realtime
+Two separate layers: GRANT decides if the role can touch the table at all, RLS decides which rows it sees. Both have to be set up.
+
+## Profile creation
+
+When a new auth user signs up, a Postgres trigger on `auth.users` creates a matching `profiles` row in the same transaction, reading the `agency_id` from the signup metadata. Either both rows are created or neither — doing it client-side after signup would be racy.
+
+In a real product you'd want an invitation flow so people can't just sign up as any agency. Out of scope here.
+
+## Avoiding duplicates between initial fetch and realtime
+
 _TBD — Phase 4_
 
-### What I left out and why
+## What I left out and why
+
 _TBD — final pass_
 
-### Where AI helped, and where it got me into trouble
+## Where AI helped, and where it bit me
+
 _TBD — final pass_
-
-## Decisions worth flagging
-
-- **Supabase region:** Mumbai (`ap-south-1`) — closest to the UAE-based reviewer for lowest realtime latency.
-- _More TBD as we build_
